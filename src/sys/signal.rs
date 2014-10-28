@@ -2,8 +2,11 @@
 // See http://rust-lang.org/COPYRIGHT.
 
 use libc;
-use core::mem;
-use errno::{SysError, SysResult};
+use time::Timespec;
+use core::{mem, i32};
+use core::intrinsics::transmute;
+use errno::{SysError, SysResult, from_ffi};
+use pthread::Pthread;
 
 pub use libc::consts::os::posix88::{
     SIGHUP,   // 1
@@ -41,11 +44,27 @@ pub use self::signal::{
     SIGUSR2,
 };
 
-pub use self::signal::SockFlag;
-pub use self::signal::sigset_t;
+pub use self::signal::{SockFlag, SigHandler, SigInfoHandler, sigset_t};
+pub use self::signal::{SA_SIGINFO};
+pub use self::siginfo::SigInfo;
 
 // This doesn't always exist, but when it does, it's 7
 pub const SIGEMT: libc::c_int = 7;
+
+#[inline]
+pub fn SIG_IGN() -> SigHandler {
+    unsafe { transmute(0i) }
+}
+
+#[inline]
+pub fn SIG_IGN_INFO() -> SigInfoHandler {
+    unsafe { transmute(0i) }
+}
+
+#[inline]
+pub fn SIG_DFL() -> SigHandler {
+    unsafe { transmute(1i) }
+}
 
 #[cfg(any(all(target_os = "linux",
               any(target_arch = "x86",
@@ -54,6 +73,7 @@ pub const SIGEMT: libc::c_int = 7;
           target_os = "android"))]
 pub mod signal {
     use libc;
+    use libc::c_int;
 
     bitflags!(
         flags SockFlag: libc::c_ulong {
@@ -91,24 +111,15 @@ pub mod signal {
     pub const SIGSYS:       libc::c_int = 31;
     pub const SIGUNUSED:    libc::c_int = 31;
 
-    // This definition is not as accurate as it could be, {pid, uid, status} is
-    // actually a giant union. Currently we're only interested in these fields,
-    // however.
-    #[repr(C)]
-    pub struct siginfo {
-        si_signo: libc::c_int,
-        si_errno: libc::c_int,
-        si_code: libc::c_int,
-        pub pid: libc::pid_t,
-        pub uid: libc::uid_t,
-        pub status: libc::c_int,
-    }
+    pub type SigHandler     = extern fn(libc::c_int);
+    pub type SigInfoHandler = extern fn(libc::c_int, info: *const super::SigInfo, *const ());
 
     #[repr(C)]
     pub struct sigaction {
-        pub sa_handler: extern fn(libc::c_int),
+        pub sa_handler: SigHandler,
+        pub sa_sigaction: SigInfoHandler,
         pub sa_mask: sigset_t,
-        pub sa_flags: SockFlag,
+        pub sa_flags: libc::c_ulong,
         sa_restorer: *mut libc::c_void,
     }
 
@@ -122,6 +133,46 @@ pub mod signal {
     #[cfg(target_word_size = "64")]
     pub struct sigset_t {
         __val: [libc::c_ulong, ..16],
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod siginfo {
+    use libc;
+    use libc::c_int;
+    use std::mem::transmute;
+
+    // this is a union of int and pointer
+    type SigVal = libc::c_int;
+
+    #[repr(C)]
+    struct RawSigInfo {
+        signo:  c_int,
+        errno:  c_int,
+        code:   c_int,
+    }
+
+    #[repr(C)]
+    pub struct SigInfo {
+        pad: [u64, ..2]
+    }
+
+    impl SigInfo {
+        pub fn signo(&self) -> c_int {
+            self.raw().signo
+        }
+
+        pub fn errno(&self) -> c_int {
+            self.raw().errno
+        }
+
+        pub fn code(&self) -> c_int {
+            self.raw().code
+        }
+
+        fn raw(&self) -> &RawSigInfo {
+            unsafe { transmute(self) }
+        }
     }
 }
 
@@ -165,23 +216,12 @@ pub mod signal {
     pub const SIGXCPU:      libc::c_int = 30;
     pub const SIGFSZ:       libc::c_int = 31;
 
-    // This definition is not as accurate as it could be, {pid, uid, status} is
-    // actually a giant union. Currently we're only interested in these fields,
-    // however.
-    #[repr(C)]
-    pub struct siginfo {
-        si_signo: libc::c_int,
-        si_code: libc::c_int,
-        si_errno: libc::c_int,
-        pub pid: libc::pid_t,
-        pub uid: libc::uid_t,
-        pub status: libc::c_int,
-    }
+    pub type SigHandler = extern fn(libc::c_int, info: *const super::SigInfo, *const ());
 
     #[repr(C)]
     pub struct sigaction {
         pub sa_flags: SockFlag,
-        pub sa_handler: extern fn(libc::c_int),
+        pub sa_handler: SigHandler,
         pub sa_mask: sigset_t,
         sa_restorer: *mut libc::c_void,
         sa_resv: [libc::c_int, ..1],
@@ -241,22 +281,12 @@ pub mod signal {
         bits: [u32, ..4],
     }
 
-    // This structure has more fields, but we're not all that interested in
-    // them.
-    #[repr(C)]
-    pub struct siginfo {
-        pub si_signo: libc::c_int,
-        pub si_errno: libc::c_int,
-        pub si_code: libc::c_int,
-        pub pid: libc::pid_t,
-        pub uid: libc::uid_t,
-        pub status: libc::c_int,
-    }
+    pub type SigHandler = extern fn(libc::c_int, *const super::SigInfo, *const ());
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[repr(C)]
     pub struct sigaction {
-        pub sa_handler: extern fn(libc::c_int),
+        pub sa_handler: SigHandler,
         sa_tramp: *mut libc::c_void,
         pub sa_mask: sigset_t,
         pub sa_flags: SockFlag,
@@ -265,32 +295,75 @@ pub mod signal {
     #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
     #[repr(C)]
     pub struct sigaction {
-        pub sa_handler: extern fn(libc::c_int),
+        pub sa_handler: extern fn(libc::c_int, *const super::SigInfo, *const ()),
         pub sa_flags: SockFlag,
         pub sa_mask: sigset_t,
     }
 
 }
 
+#[cfg(any(target_os = "macos",
+          target_os = "ios",
+          target_os = "freebsd",
+          target_os = "dragonfly"))]
+mod siginfo {
+    use libc;
+    use libc::c_int;
+
+    type SigVal = libc::c_int;
+
+    #[repr(C)]
+    struct SigInfo {
+        pub signo:      c_int,
+        errno:      c_int,
+        code:       c_int,
+        pid:        libc::pid_t,
+        uid:        libc::uid_t,
+        status:     c_int,
+        addr:       *const (),
+        value:      SigVal,
+        band:       libc::c_long,
+        pad:        [libc::c_ulong, ..7]
+    }
+}
+
 mod ffi {
     use libc;
+    use libc::c_int;
     use super::signal::{sigaction, sigset_t};
+    use pthread::Pthread;
 
     extern {
         pub fn sigaction(signum: libc::c_int,
                          act: *const sigaction,
                          oldact: *mut sigaction) -> libc::c_int;
 
+        pub fn sigfillset(set: *mut sigset_t) -> libc::c_int;
         pub fn sigaddset(set: *mut sigset_t, signum: libc::c_int) -> libc::c_int;
         pub fn sigdelset(set: *mut sigset_t, signum: libc::c_int) -> libc::c_int;
         pub fn sigemptyset(set: *mut sigset_t) -> libc::c_int;
 
         pub fn kill(pid: libc::pid_t, signum: libc::c_int) -> libc::c_int;
+        pub fn pthread_kill(thread: Pthread, signum: libc::c_int) -> libc::c_int;
+
+        pub fn pthread_sigmask(how: c_int, sigset: *const sigset_t, oldset: *mut sigset_t) -> c_int;
+
+        pub fn sigpending(set: *mut sigset_t) -> libc::c_int;
+        pub fn sigwaitinfo(set: *const sigset_t, info: *mut super::SigInfo) -> libc::c_int;
+        pub fn sigtimedwait(set: *const sigset_t, info: *mut super::SigInfo, timeout: *const libc::timespec) -> c_int;
     }
 }
 
 pub struct SigSet {
     sigset: sigset_t
+}
+
+#[repr(C)]
+#[deriving(Show)]
+pub enum SigMaskHow {
+    SIG_BLOCK   = 0,
+    SIG_UNBLOCK = 1,
+    SIG_SETMASK = 2,
 }
 
 pub type SigNum = libc::c_int;
@@ -303,8 +376,19 @@ impl SigSet {
         SigSet { sigset: sigset }
     }
 
+    pub fn all() -> SigSet {
+        let mut sigset = unsafe { mem::uninitialized::<sigset_t>() };
+        let _ = unsafe { ffi::sigfillset(&mut sigset as *mut sigset_t) };
+
+        SigSet { sigset: sigset }
+    }
+
     pub fn inner(&self) -> &sigset_t {
         &self.sigset
+    }
+
+    pub fn inner_mut(&mut self) -> &mut sigset_t {
+        &mut self.sigset
     }
 
     pub fn add(&mut self, signum: SigNum) -> SysResult<()> {
@@ -335,10 +419,21 @@ pub struct SigAction {
 }
 
 impl SigAction {
-    pub fn new(handler: extern fn(libc::c_int), flags: SockFlag, mask: SigSet) -> SigAction {
+    pub fn new(handler: SigHandler, flags: SockFlag, mask: SigSet) -> SigAction {
         let mut s = unsafe { mem::uninitialized::<sigaction_t>() };
+
         s.sa_handler = handler;
-        s.sa_flags = flags;
+        s.sa_flags = flags.bits();
+        s.sa_mask = mask.sigset;
+
+        SigAction { sigaction: s }
+    }
+
+    pub fn new_info(handler: SigInfoHandler, flags: SockFlag, mask: SigSet) -> SigAction {
+        let mut s = unsafe { mem::uninitialized::<sigaction_t>() };
+
+        s.sa_sigaction = handler;
+        s.sa_flags = flags.bits() | SA_SIGINFO.bits();
         s.sa_mask = mask.sigset;
 
         SigAction { sigaction: s }
@@ -359,6 +454,20 @@ pub fn sigaction(signum: SigNum, sigaction: &SigAction) -> SysResult<SigAction> 
     Ok(SigAction { sigaction: oldact })
 }
 
+pub fn pthread_sigmask(how: SigMaskHow, sigset: &SigSet) -> SysResult<SigSet> {
+    let mut oldmask = unsafe { mem::uninitialized::<sigset_t>() };
+
+    let res = unsafe {
+        ffi::pthread_sigmask(how as libc::c_int, &sigset.sigset as *const sigset_t, &mut oldmask as *mut sigset_t)
+    };
+
+    if res < 0 {
+        return Err(SysError::last());
+    }
+
+    Ok(SigSet { sigset: oldmask })
+}
+
 pub fn kill(pid: libc::pid_t, signum: SigNum) -> SysResult<()> {
     let res = unsafe { ffi::kill(pid, signum) };
 
@@ -367,4 +476,86 @@ pub fn kill(pid: libc::pid_t, signum: SigNum) -> SysResult<()> {
     }
 
     Ok(())
+}
+
+pub fn pthread_kill(thread: Pthread, sig: SigNum) -> SysResult<()> {
+    let res = unsafe { ffi::pthread_kill(thread, sig) };
+
+    if res == 0 {
+        Ok(())
+    } else {
+        Err(SysError::from_errno(res as int))
+    }
+}
+
+pub fn sigwaitinfo(set: SigSet) -> SysResult<SigInfo> {
+    let mut info = unsafe { mem::uninitialized::<SigInfo>() };
+    let res = unsafe { ffi::sigwaitinfo(set.inner(), &mut info as *mut SigInfo) };
+
+    if res < 0 {
+        return Err(SysError::last());
+    }
+
+    Ok(info)
+}
+
+pub fn sigtimedwait(set: SigSet, timeout: Timespec) -> SysResult<SigInfo> {
+    let timespec = libc::timespec { tv_sec: timeout.sec, tv_nsec: timeout.nsec as libc::c_long };
+    let mut info = unsafe { mem::uninitialized::<SigInfo>() };
+    let res = unsafe { ffi::sigtimedwait(set.inner(), &mut info as *mut SigInfo, &timespec as *const libc::timespec) };
+
+    if res < 0 {
+        return Err(SysError::last());
+    }
+
+    Ok(info)
+}
+
+pub fn sigpending() -> SysResult<SigSet> {
+    let mut set = unsafe { mem::uninitialized::<SigSet>() };
+    let res = unsafe { ffi::sigpending(set.inner_mut()) };
+
+    if res < 0 {
+        return Err(SysError::last());
+    }
+
+    Ok(set)
+}
+
+#[cfg(test)]
+mod test {
+    use libc;
+    use pthread::pthread_self;
+    use time::Timespec;
+    use super::{
+        SigSet,
+        SigAction,
+        SA_SIGINFO,
+        SIG_IGN,
+        SIG_IGN_INFO,
+        SIG_BLOCK,
+        SIGQUIT,
+        pthread_sigmask,
+        pthread_kill,
+        sigaction,
+        sigwaitinfo,
+        sigtimedwait,
+    };
+
+    #[test]
+    fn test_simple_signal() {
+        let mut mask = SigSet::empty();
+        mask.add(SIGQUIT).unwrap();
+
+        pthread_sigmask(SIG_BLOCK, &mask).unwrap();
+
+        let action = SigAction::new_info(SIG_IGN_INFO(), SA_SIGINFO, SigSet::empty());
+        sigaction(SIGQUIT, &action).unwrap();
+
+        pthread_kill(pthread_self(), SIGQUIT).unwrap();
+
+        let info = sigtimedwait(mask, Timespec { sec: 0, nsec: 0 }).unwrap();
+
+        assert_eq!(info.signo(), SIGQUIT);
+    }
 }

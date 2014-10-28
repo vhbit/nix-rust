@@ -12,7 +12,6 @@ mod ffi {
     }
 }
 
-#[allow(dead_code)]
 #[repr(C)]
 pub struct SigInfo {
     signo:      u32,

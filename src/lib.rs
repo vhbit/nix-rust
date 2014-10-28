@@ -6,6 +6,7 @@
 #![allow(non_camel_case_types)]
 
 extern crate libc;
+extern crate time;
 extern crate core;
 
 // Re-export some libc constants
@@ -37,3 +38,5 @@ pub mod syscall;
 
 #[cfg(unix)]
 pub mod unistd;
+
+pub mod pthread;

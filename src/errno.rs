@@ -14,7 +14,11 @@ pub struct SysError {
 
 impl SysError {
     pub fn last() -> SysError {
-        match from_int(errno()) {
+        SysError::from_errno(errno())
+    }
+
+    pub fn from_errno(errno: int) -> SysError {
+        match from_int(errno) {
             Some(no) => SysError::new(no),
             _ => SysError::new(UnknownErrno)
         }
