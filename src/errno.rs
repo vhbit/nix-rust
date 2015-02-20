@@ -19,7 +19,7 @@ macro_rules! impl_errno {
 }
 
 fn last() -> Errno {
-    from_i32(errno()).unwrap_or(UnknownErrno)
+    from_i32(errno() as i32).unwrap_or(UnknownErrno)
 }
 
 fn desc(errno: Errno) -> &'static str {
