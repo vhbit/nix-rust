@@ -72,9 +72,11 @@ mod ffi {
 }
 
 pub fn open<P: NixPath>(path: P, oflag: OFlag, mode: Mode) -> NixResult<Fd> {
+    use libc;
+
     let fd = try!(path.with_nix_path(|ptr| {
         unsafe {
-            ffi::open(ptr, oflag.bits(), mode.bits() as mode_t)
+            ffi::open(ptr, oflag.bits(), mode.bits())
         }
     }));
 

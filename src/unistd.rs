@@ -112,6 +112,7 @@ pub struct ToWrite;
 pub struct Iovec<T> {
     iov_base: *mut c_void,
     iov_len: size_t,
+    marker: ::std::marker::PhantomData<T>,
 }
 
 impl <T> Iovec<T> {
@@ -126,7 +127,8 @@ impl Iovec<ToWrite> {
     pub fn from_slice(buf: &[u8]) -> Iovec<ToWrite> {
         Iovec {
             iov_base: buf.as_ptr() as *mut c_void,
-            iov_len: buf.len() as size_t
+            iov_len: buf.len() as size_t,
+            marker: ::std::marker::PhantomData
         }
     }
 }
@@ -136,7 +138,8 @@ impl Iovec<ToRead> {
     pub fn from_mut_slice(buf: &mut [u8]) -> Iovec<ToRead> {
         Iovec {
             iov_base: buf.as_ptr() as *mut c_void,
-            iov_len: buf.len() as size_t
+            iov_len: buf.len() as size_t,
+            marker: ::std::marker::PhantomData
         }
     }
 }
